@@ -197,7 +197,11 @@ static void extract_message(char **buffer, size_t *buffer_length,
 	*message = malloc(*message_length + 1);
 	const int ret = sprintf(*message, "%.*s", (int)*message_length, *buffer);
 	check_error(ret);
-	strcpy(*buffer, &(*buffer)[*message_length]);
+	size_t i = 0;
+	for (; (*buffer)[*message_length + i]; ++i) {
+		(*buffer)[i] = (*buffer)[*message_length + i];
+	}
+	(*buffer)[i] = '\0';
 	*buffer_length = *buffer_length - *message_length;
 }
 
