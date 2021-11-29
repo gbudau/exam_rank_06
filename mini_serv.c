@@ -45,19 +45,28 @@ static void error_exit(const char *msg) {
 	exit(EXIT_FAILURE);
 }
 
-static void check_null(void *ptr) {
+static void check_null(const void *ptr) {
 	if (ptr == NULL) {
 		error_exit(fatal_error);
 	}
 }
 
-static void check_error(int ret) {
+static void check_error(const int ret) {
 	if (ret < 0) {
 		error_exit(fatal_error);
 	}
 }
 
-static int make_listen_socket(int port) {
+static int strchr_index(const char *s, char c) {
+	for (size_t i = 0; s[i]; ++i) {
+		if (s[i] == c) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static int make_listen_socket(const int port) {
 	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	check_error(sockfd);
 
@@ -76,14 +85,20 @@ static int make_listen_socket(int port) {
 	return sockfd;
 }
 
+static void str_join(char **dst, size_t *dst_size,
+					const char *src, const size_t src_size) {
+	size_t new_size = *dst_size + src_size;
+	char *new_str = realloc(*dst, new_size + 1);
+	check_null(new_str);
+	strcpy(&new_str[*dst_size], src);
+	*dst = new_str;
+	*dst_size = new_size;
+}
+
 static void add_message_to_client(t_client *client,
-										char *message, size_t message_length) {
-	char *new_buff = realloc(client->sendbuffer,
-								client->sendbuffer_length + message_length + 1);
-	check_null(new_buff);
-	client->sendbuffer = new_buff;
-	strcpy(&client->sendbuffer[client->sendbuffer_length], message);
-	client->sendbuffer_length += message_length;
+							const char *message, const size_t message_length) {
+	str_join(&client->sendbuffer, &client->sendbuffer_length,
+			message, message_length);
 }
 
 static void add_message_to_other_clients(t_server *server, t_client *client,
@@ -98,7 +113,7 @@ static void add_message_to_other_clients(t_server *server, t_client *client,
 	}
 }
 
-static void resize_clients_array(t_server *server, size_t index) {
+static void resize_clients_array(t_server *server, const size_t index) {
 		size_t new_capacity = 2 * server->clients_capacity;
 		if (index >= new_capacity) {
 			new_capacity = index + 1;
@@ -113,7 +128,7 @@ static void resize_clients_array(t_server *server, size_t index) {
 		server->clients_capacity = new_capacity;
 }
 
-static t_client *create_new_client(t_server *server) {
+static t_client *create_new_client(const t_server *server) {
 	int client_sd = accept(server->listen_sd, NULL, NULL);
 	check_error(client_sd);
 	t_client *client = calloc(1, sizeof(*client));
@@ -131,10 +146,10 @@ static void add_new_client(t_server *server) {
 		resize_clients_array(server, client->sd);
 	}
 
-	server->clients[client_sd] = client;
-	FD_SET(client_sd, &server->read_set);
-	if (server->max_sd < client_sd) {
-		server->max_sd = client_sd;
+	server->clients[client->sd] = client;
+	FD_SET(client->sd, &server->read_set);
+	if (server->max_sd < client->sd) {
+		server->max_sd = client->sd;
 	}
 
 	char buffer[SPRINTF_BUFFER_SIZE];
@@ -144,7 +159,7 @@ static void add_new_client(t_server *server) {
 	add_message_to_other_clients(server, client, buffer, length);
 }
 
-static void set_max_sd(t_server *server, int sd) {
+static void set_max_sd(t_server *server, const int sd) {
 	if (server->max_sd == sd) {
 		while (!FD_ISSET(server->max_sd, &server->read_set) &&
 				!FD_ISSET(server->max_sd, &server->write_set)) {
@@ -170,6 +185,48 @@ static void remove_client(t_server *server, t_client *client) {
 	check_error(close(client_sd));
 }
 
+static void extract_message(char **buffer, size_t *buffer_length,
+							char **message, size_t *message_length) {
+	*message = NULL;
+	*message_length = 0;
+	int newline_index = strchr_index(*buffer, '\n');
+	if (newline_index == -1) {
+		return;
+	}
+	*message_length = newline_index + 1;
+	*message = malloc(*message_length + 1);
+	const int ret = sprintf(*message, "%.*s", (int)*message_length, *buffer);
+	check_error(ret);
+	strcpy(*buffer, &(*buffer)[*message_length]);
+	*buffer_length = *buffer_length - *message_length;
+}
+
+static void extract_all_messages(t_server *server, t_client *client) {
+	while (42) {
+		char *message = NULL;
+		size_t message_length = 0;
+		extract_message(&client->recvbuffer, &client->recvbuffer_length,
+				&message, &message_length);
+		if (message == NULL) {
+			return;
+		}
+
+		char prefix_buffer[SPRINTF_BUFFER_SIZE];
+		int prefix_len = sprintf(prefix_buffer, "client %zu: ", client->id);
+		check_error(prefix_len);
+
+		size_t prefixed_message_length = prefix_len + message_length;
+		char *prefixed_message = malloc(prefixed_message_length + 1);
+		strcpy(prefixed_message, prefix_buffer);
+		strcpy(&prefixed_message[prefix_len], message);
+
+		add_message_to_other_clients(server, client,
+								prefixed_message, prefixed_message_length);
+		free(message);
+		free(prefixed_message);
+	}
+}
+
 static void recv_data(t_server *server, t_client *client) {
 	char buffer[RECV_BUFFER_SIZE + 1] = {0};
 
@@ -178,19 +235,9 @@ static void recv_data(t_server *server, t_client *client) {
 	if (nbytes == 0) {
 		remove_client(server, client);
 	} else {
-		char prefix_buffer[SPRINTF_BUFFER_SIZE];
-		int prefix_len = sprintf(prefix_buffer, "client %zu: ", client->id);
-		check_error(prefix_len);
-
-		size_t message_length = prefix_len + nbytes;
-		char *message = malloc(message_length + 1);
-		if (message == NULL) {
-			error_exit(fatal_error);
-		}
-		strcpy(message, prefix_buffer);
-		strcpy(&message[prefix_len], buffer);
-		add_message_to_other_clients(server, client, message, message_length);
-		free(message);
+		str_join(&client->recvbuffer, &client->recvbuffer_length,
+				buffer, nbytes);
+		extract_all_messages(server, client);
 	}
 }
 
