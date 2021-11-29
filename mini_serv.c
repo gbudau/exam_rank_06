@@ -26,7 +26,9 @@ typedef struct server {
 	fd_set read_set;
 	fd_set write_set;
 
-	t_client *clients[FD_SETSIZE];
+	t_client **clients;
+	size_t clients_capacity;
+
 	size_t new_client_id;
 
 } t_server;
@@ -36,22 +38,28 @@ enum e_constants {
 	SPRINTF_BUFFER_SIZE = 128
 };
 
-static const char *wrong_argument_number = "Wrong number of arguments\n";
 static const char *fatal_error = "Fatal error\n";
-static const char *client_arrive_fmt = "server: client %zu just arrived\n";
-static const char *message_prefix_fmt = "client %zu: ";
-static const char *client_left_fmt = "server: client %zu just left\n";
 
 static void error_exit(const char *msg) {
 	write(STDERR_FILENO, msg, strlen(msg));
 	exit(EXIT_FAILURE);
 }
 
-static int make_listen_socket(int port) {
-	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-	if (sockfd < 0) {
+static void check_null(void *ptr) {
+	if (ptr == NULL) {
 		error_exit(fatal_error);
 	}
+}
+
+static void check_error(int ret) {
+	if (ret < 0) {
+		error_exit(fatal_error);
+	}
+}
+
+static int make_listen_socket(int port) {
+	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	check_error(sockfd);
 
 	struct sockaddr_in servaddr = {0};
 
@@ -61,13 +69,10 @@ static int make_listen_socket(int port) {
 	servaddr.sin_port = htons(port);
 
 	// Binding newly created socket to given address
-	if (bind(sockfd, (const struct sockaddr*)&servaddr, sizeof(servaddr)) != 0) {
-		error_exit(fatal_error);
-	}
+	check_error(bind(sockfd, (const struct sockaddr*)&servaddr, sizeof(servaddr)));
 
-	if (listen(sockfd, SOMAXCONN) != 0) {
-		error_exit(fatal_error);
-	}
+	// Set the socket to listen mode
+	check_error(listen(sockfd, SOMAXCONN));
 	return sockfd;
 }
 
@@ -75,9 +80,7 @@ static void add_message_to_client(t_client *client,
 										char *message, size_t message_length) {
 	char *new_buff = realloc(client->sendbuffer,
 								client->sendbuffer_length + message_length + 1);
-	if (new_buff == NULL) {
-		error_exit(fatal_error);
-	}
+	check_null(new_buff);
 	client->sendbuffer = new_buff;
 	strcpy(&client->sendbuffer[client->sendbuffer_length], message);
 	client->sendbuffer_length += message_length;
@@ -95,18 +98,38 @@ static void add_message_to_other_clients(t_server *server, t_client *client,
 	}
 }
 
-static void add_new_client(t_server *server) {
+static void resize_clients_array(t_server *server, size_t index) {
+		size_t new_capacity = 2 * server->clients_capacity;
+		if (index >= new_capacity) {
+			new_capacity = index + 1;
+		}
+		t_client **new_clients_array =
+					realloc(server->clients, new_capacity * sizeof(t_client *));
+		check_null(new_clients_array);
+		size_t new_elements = new_capacity - server->clients_capacity;
+		memset(&new_clients_array[server->clients_capacity], 0,
+											new_elements * sizeof(t_client *));
+		server->clients = new_clients_array;
+		server->clients_capacity = new_capacity;
+}
+
+static t_client *create_new_client(t_server *server) {
 	int client_sd = accept(server->listen_sd, NULL, NULL);
-	if (client_sd < 0) {
-		error_exit(fatal_error);
-	}
+	check_error(client_sd);
 	t_client *client = calloc(1, sizeof(*client));
-	if (client == NULL) {
-		error_exit(fatal_error);
-	}
+	check_null(client);
 	client->sd = client_sd;
 	client->id = server->new_client_id;
+	return client;
+}
+
+static void add_new_client(t_server *server) {
+	t_client *client = create_new_client(server);
 	++server->new_client_id;
+
+	if ((size_t)client->sd >= server->clients_capacity) {
+		resize_clients_array(server, client->sd);
+	}
 
 	server->clients[client_sd] = client;
 	FD_SET(client_sd, &server->read_set);
@@ -115,7 +138,9 @@ static void add_new_client(t_server *server) {
 	}
 
 	char buffer[SPRINTF_BUFFER_SIZE];
-	int length = sprintf(buffer, client_arrive_fmt, client->id);
+	int length =
+			sprintf(buffer, "server: client %zu just arrived\n", client->id);
+	check_error(length);
 	add_message_to_other_clients(server, client, buffer, length);
 }
 
@@ -130,7 +155,8 @@ static void set_max_sd(t_server *server, int sd) {
 
 static void remove_client(t_server *server, t_client *client) {
 	char buffer[SPRINTF_BUFFER_SIZE];
-	int length = sprintf(buffer, client_left_fmt, client->id);
+	int length = sprintf(buffer, "server: client %zu just left\n", client->id);
+	check_error(length);
 	add_message_to_other_clients(server, client, buffer, length);
 
 	int client_sd = client->sd;
@@ -141,23 +167,20 @@ static void remove_client(t_server *server, t_client *client) {
 	FD_CLR(client_sd, &server->read_set);
 	FD_CLR(client_sd, &server->write_set);
 	set_max_sd(server, client_sd);
-	if (close(client_sd) < 0) {
-		error_exit(fatal_error);
-	}
+	check_error(close(client_sd));
 }
 
 static void recv_data(t_server *server, t_client *client) {
 	char buffer[RECV_BUFFER_SIZE + 1] = {0};
 
 	ssize_t nbytes = recv(client->sd, buffer, RECV_BUFFER_SIZE, 0);
-	if (nbytes < 0) {
-		error_exit(fatal_error);
-	}
+	check_error(nbytes);
 	if (nbytes == 0) {
 		remove_client(server, client);
 	} else {
 		char prefix_buffer[SPRINTF_BUFFER_SIZE];
-		int prefix_len = sprintf(prefix_buffer, message_prefix_fmt, client->id);
+		int prefix_len = sprintf(prefix_buffer, "client %zu: ", client->id);
+		check_error(prefix_len);
 
 		size_t message_length = prefix_len + nbytes;
 		char *message = malloc(message_length + 1);
@@ -174,9 +197,7 @@ static void recv_data(t_server *server, t_client *client) {
 static void send_data(t_server *server, t_client *client) {
 	ssize_t nbytes =
 			send(client->sd, client->sendbuffer, client->sendbuffer_length, 0);
-	if (nbytes < 0) {
-		error_exit(fatal_error);
-	}
+	check_error(nbytes);
 	if (nbytes == 0) {
 		remove_client(server, client);
 	} else {
@@ -195,41 +216,41 @@ static void send_data(t_server *server, t_client *client) {
 }
 
 static void run_server(t_server *server) {
-	t_client **clients = server->clients;
-
 	while (42) {
 		fd_set read_set = server->read_set;
 		fd_set write_set = server->write_set;
 		int ready_sockets = select(server->max_sd + 1,
 									&read_set, &write_set,
 									NULL, NULL);
-		if (ready_sockets < 0) {
-			error_exit(fatal_error);
-		}
+		check_error(ready_sockets);
 		for (int sd = 0; sd <= server->max_sd && ready_sockets; ++sd) {
 			if (FD_ISSET(sd, &read_set)) {
 				if (sd == server->listen_sd) {
 					add_new_client(server);
 				} else {
-					recv_data(server, clients[sd]);
+					recv_data(server, server->clients[sd]);
 				}
 				--ready_sockets;
 			} else if (FD_ISSET(sd, &write_set)) {
-				send_data(server, clients[sd]);
+				send_data(server, server->clients[sd]);
 				--ready_sockets;
 			}
 		}
 	}
 }
 
+static void init_server(t_server *server, int port) {
+	server->listen_sd = make_listen_socket(port);
+	FD_SET(server->listen_sd, &server->read_set);
+	server->max_sd = server->listen_sd;
+}
+
 int main(int argc, char **argv) {
 	if (argc != 2) {
-		error_exit(wrong_argument_number);
+		error_exit("Wrong number of arguments\n");
 	}
 	t_server server = {0};
 	int port = atoi(argv[1]);
-	server.listen_sd = make_listen_socket(port);
-	FD_SET(server.listen_sd, &server.read_set);
-	server.max_sd = server.listen_sd;
+	init_server(&server, port);
 	run_server(&server);
 }
