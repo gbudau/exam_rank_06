@@ -209,12 +209,18 @@ static void extract_message(char **buffer, size_t *buffer_length,
 }
 
 static void extract_all_messages(t_server *server, t_client *client) {
+	char *messages_buffer = NULL;
+	size_t messages_buffer_length = 0;
+
 	while (42) {
 		char *message = NULL;
 		size_t message_length = 0;
 		extract_message(&client->recvbuffer, &client->recvbuffer_length,
 				&message, &message_length);
 		if (message == NULL) {
+			add_message_to_other_clients(server, client,
+									messages_buffer, messages_buffer_length);
+			free(messages_buffer);
 			return;
 		}
 
@@ -226,9 +232,8 @@ static void extract_all_messages(t_server *server, t_client *client) {
 		char *prefixed_message = malloc(prefixed_message_length + 1);
 		strcpy(prefixed_message, prefix_buffer);
 		strcpy(&prefixed_message[prefix_len], message);
-
-		add_message_to_other_clients(server, client,
-								prefixed_message, prefixed_message_length);
+		str_join(&messages_buffer, &messages_buffer_length,
+									prefixed_message, prefixed_message_length);
 		free(message);
 		free(prefixed_message);
 	}
