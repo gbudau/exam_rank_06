@@ -186,7 +186,7 @@ static void remove_client(t_server *server, t_client *client) {
 
 static void ft_strcpy(char *dest, const char *src) {
 	size_t i = 0;
-	for (; dest[i]; ++i) {
+	for (; src[i]; ++i) {
 		dest[i] = src[i];
 	}
 	dest[i] = '\0';
