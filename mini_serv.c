@@ -290,7 +290,8 @@ static void run_server(t_server *server) {
 					recv_data(server, server->clients[sd]);
 				}
 				--ready_sockets;
-			} else if (FD_ISSET(sd, &write_set)) {
+			}
+			if (FD_ISSET(sd, &write_set)) {
 				send_data(server, server->clients[sd]);
 				--ready_sockets;
 			}
