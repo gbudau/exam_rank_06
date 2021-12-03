@@ -50,8 +50,8 @@ static void check_null(const void *ptr) {
 	}
 }
 
-static void check_error(const int ret) {
-	if (ret < 0) {
+static void check_error(const int return_status) {
+	if (return_status < 0) {
 		error_exit(fatal_error);
 	}
 }
@@ -77,7 +77,7 @@ static int make_listen_socket(const int port) {
 	servaddr.sin_port = htons(port);
 
 	// Binding newly created socket to given address
-	check_error(bind(sockfd, (const struct sockaddr*)&servaddr, sizeof(servaddr)));
+	check_error(bind(sockfd, (struct sockaddr*)&servaddr, sizeof(servaddr)));
 
 	// Set the socket to listen mode
 	check_error(listen(sockfd, SOMAXCONN));
