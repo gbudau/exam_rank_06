@@ -185,6 +185,14 @@ static void remove_client(t_server *server, t_client *client) {
 	check_error(close(client_sd));
 }
 
+static void ft_strcpy(char *dest, const char *src) {
+	size_t i = 0;
+	for (; dest[i]; ++i) {
+		dest[i] = src[i];
+	}
+	dest[i] = '\0';
+}
+
 static void extract_message(char **buffer, size_t *buffer_length,
 							char **message, size_t *message_length) {
 	*message = NULL;
@@ -197,11 +205,7 @@ static void extract_message(char **buffer, size_t *buffer_length,
 	*message = malloc(*message_length + 1);
 	const int ret = sprintf(*message, "%.*s", (int)*message_length, *buffer);
 	check_error(ret);
-	size_t i = 0;
-	for (; (*buffer)[*message_length + i]; ++i) {
-		(*buffer)[i] = (*buffer)[*message_length + i];
-	}
-	(*buffer)[i] = '\0';
+	ft_strcpy(*buffer, &(*buffer)[*message_length]);
 	*buffer_length = *buffer_length - *message_length;
 }
 
