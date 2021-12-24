@@ -37,6 +37,7 @@ typedef struct s_server {
 	t_client **clients;
 	int clients_size;
 
+	fd_set all_fds;
 	fd_set read_fds;
 	fd_set write_fds;
 } t_server;
@@ -88,17 +89,17 @@ void add_message_to_other_clients(t_server *server, t_client *client,
 									const char *message, int len) {
 	for (int fd = 0; fd <= server->max_fd; ++fd) {
 		if (server->clients[fd] != NULL &&
-				fd != server->listen_fd &&
 				fd != client->fd) {
 			add_message_to_client(server->clients[fd], message, len);
-			FD_SET(fd, &server->write_fds);
 		}
 	}
 }
 
 void accept_new_client(t_server *server) {
 	int fd = accept(server->listen_fd, NULL, NULL);
-	check_error(fd);
+	if (fd < 0) {
+		return;
+	}
 
 	if (fd >= server->clients_size) {
 		int new_size = server->clients_size * 2;
@@ -119,7 +120,7 @@ void accept_new_client(t_server *server) {
 	add_message_to_other_clients(server, client, message_buffer, len);
 
 	server->clients[fd] = client;
-	FD_SET(fd, &server->read_fds);
+	FD_SET(fd, &server->all_fds);
 	if (fd > server->max_fd) {
 		server->max_fd = fd;
 	}
@@ -127,8 +128,7 @@ void accept_new_client(t_server *server) {
 
 void set_max_fd(t_server *server, int fd) {
 	if (fd == server->max_fd) {
-		while (!FD_ISSET(server->max_fd, &server->read_fds) &&
-				!FD_ISSET(server->max_fd, &server->write_fds)) {
+		while (!FD_ISSET(server->max_fd, &server->all_fds)) {
 			--server->max_fd;
 		}
 	}
@@ -147,21 +147,12 @@ void remove_client(t_server *server, int fd) {
 	free(client);
 	server->clients[fd] = NULL;
 
+	FD_CLR(fd, &server->all_fds);
 	FD_CLR(fd, &server->read_fds);
 	FD_CLR(fd, &server->write_fds);
 	set_max_fd(server, fd);
 
-	int ret = close(fd);
-	check_error(ret);
-}
-
-int find_index(const char *str, char c) {
-	for (int i = 0; str[i]; ++i) {
-		if (str[i] == c) {
-			return i;
-		}
-	}
-	return -1;
+	close(fd);
 }
 
 void ft_forward_strcpy(char *dst, const char *src) {
@@ -179,9 +170,9 @@ t_message parse_recv_buffer(t_client *client) {
 	check_error(prefix_len);
 
 	t_message messages = {0};
-	int newline_pos = find_index(client->recv_buffer, '\n');
-	while (newline_pos != -1) {
-		int message_len = newline_pos + 1;
+	char *newline_pos = strstr(client->recv_buffer, "\n");
+	while (newline_pos != NULL) {
+		int message_len = (newline_pos - client->recv_buffer) + 1;
 		int prefixed_message_len = prefix_len + message_len;
 		
 		char *prefixed_message = malloc(prefixed_message_len + 1);
@@ -196,7 +187,7 @@ t_message parse_recv_buffer(t_client *client) {
 										prefixed_message, prefixed_message_len);
 
 		free(prefixed_message);
-		newline_pos = find_index(client->recv_buffer, '\n');
+		newline_pos = strstr(client->recv_buffer, "\n");
 	}
 
 	return messages;
@@ -206,9 +197,10 @@ void read_client_data(t_server *server, t_client *client) {
 	char recv_buffer[RECV_BUFFER_LENGTH + 1] = {0};
 
 	int nbytes = recv(client->fd, recv_buffer, RECV_BUFFER_LENGTH, 0);
-	check_error(nbytes);
 
-	if (nbytes == 0) {
+	if (nbytes < 0) {
+		return;
+	} else if (nbytes == 0) {
 		remove_client(server, client->fd);
 	} else {
 		buffer_join(&client->recv_buffer, &client->recv_buffer_len,
@@ -222,39 +214,45 @@ void read_client_data(t_server *server, t_client *client) {
 	}
 }
 
-void send_client_data(t_server *server, t_client *client) {
+void send_client_data(t_client *client) {
 	int nbytes = send(client->fd, client->send_buffer, client->send_buffer_len, 0);
 	if (nbytes <= 0) {
-		fatal_error();
+		return;
 	}
 
 	ft_forward_strcpy(client->send_buffer, &client->send_buffer[nbytes]);
 	client->send_buffer_len -= nbytes;
+}
 
-	if (client->send_buffer_len == 0) {
-		FD_CLR(client->fd, &server->write_fds);
+void send_all(t_server *server) {
+	for (int fd = 0; fd <= server->max_fd; ++fd) {
+		t_client *client = server->clients[fd];
+		if (client != NULL &&
+				client->send_buffer_len != 0 &&
+				FD_ISSET(fd, &server->write_fds)) {
+			send_client_data(client);
+		}
 	}
 }
 
 void run(t_server *server) {
 	while (42) {
-		fd_set read_fds = server->read_fds;
-		fd_set write_fds = server->write_fds;
+		server->read_fds = server->write_fds = server->all_fds;
 
-		int ready_clients = select(server->max_fd + 1, &read_fds, &write_fds,
-														NULL, NULL);
-		check_error(ready_clients);
-		for (int fd = 0; fd <= server->max_fd && ready_clients > 0; ++fd) {
-			if (FD_ISSET(fd, &read_fds)) {
-				--ready_clients;
+		int ready_clients = select(server->max_fd + 1,
+									&server->read_fds, &server->write_fds,
+									NULL, NULL);
+		if (ready_clients <= 0) {
+			continue;
+		}
+		for (int fd = 0; fd <= server->max_fd; ++fd) {
+			if (FD_ISSET(fd, &server->read_fds)) {
 				if (fd == server->listen_fd) {
 					accept_new_client(server);
 				} else {
 					read_client_data(server, server->clients[fd]);
 				}
-			} else if (FD_ISSET(fd, &write_fds)) {
-				--ready_clients;
-				send_client_data(server, server->clients[fd]);
+				send_all(server);
 			}
 		}
 	}
@@ -283,7 +281,7 @@ int main(int argc, char **argv) {
 	t_server server = {0};
 	server.listen_fd = listen_fd;
 	server.max_fd = listen_fd;
-	FD_SET(listen_fd, &server.read_fds);
+	FD_SET(listen_fd, &server.all_fds);
 
 	run(&server);
 }
